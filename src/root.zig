@@ -17,4 +17,5 @@ test {
     _ = @import("wayland/source.zig");
     _ = @import("bridge/state.zig");
     _ = @import("bridge/sync.zig");
+    _ = @import("daemon.zig");
 }

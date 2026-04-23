@@ -53,6 +53,25 @@ pub fn build(b: *std.Build) void {
     });
     b.installArtifact(lib);
 
+    // Executable
+    const exe_mod = b.addModule("scoville-exe", .{
+        .root_source_file = b.path("src/main.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "c", .module = translate_c.createModule() },
+        },
+    });
+    exe_mod.addCSourceFile(.{ .file = primary_sel_code });
+    exe_mod.linkSystemLibrary("wayland-client", .{});
+    exe_mod.link_libc = true;
+
+    const exe = b.addExecutable(.{
+        .name = "scoville",
+        .root_module = exe_mod,
+    });
+    b.installArtifact(exe);
+
     // Tests
     const lib_unit_tests = b.addTest(.{
         .root_module = lib_mod,
