@@ -8,7 +8,10 @@ pub fn build(b: *std.Build) void {
         std.log.Level,
         "log_level",
         "Log verbosity (err, warn, info, debug; default: info)",
-    ) orelse .info;
+    ) orelse fromEnv: {
+        const env = b.graph.environ_map.get("LOG_LEVEL") orelse break :fromEnv .info;
+        break :fromEnv std.meta.stringToEnum(std.log.Level, env) orelse .info;
+    };
 
     // Build options module shared by library and executable
     const options = b.addOptions();
