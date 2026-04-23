@@ -445,8 +445,6 @@ test "transactAlloc with short reply" {
             .{ .ecx = (STATUS_SUCCESS << 16) },
             // sendCommandData (1 chunk for "ping")
             .{ .ecx = (STATUS_SUCCESS << 16) },
-            // sendCommandData (NUL terminator)
-            .{ .ecx = (STATUS_SUCCESS << 16) },
             // receiveReplyLength: 4 bytes, reply_id in edx high
             .{
                 .ecx = ((STATUS_SUCCESS | STATUS_DORECV) << 16),
@@ -482,8 +480,6 @@ test "oversized reply rejected with ReplyTooLarge" {
             // sendCommandLength
             .{ .ecx = (STATUS_SUCCESS << 16) },
             // sendCommandData (1 chunk for "big")
-            .{ .ecx = (STATUS_SUCCESS << 16) },
-            // sendCommandData (NUL terminator)
             .{ .ecx = (STATUS_SUCCESS << 16) },
             // receiveReplyLength: exceeds limit
             .{
