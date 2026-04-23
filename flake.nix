@@ -35,7 +35,7 @@
       default = pkgs.stdenv.mkDerivation {
         name = "scoville";
         src = ./.;
-        nativeBuildInputs = [zig pkgs.pkg-config pkgs.wayland-scanner];
+        nativeBuildInputs = [zig pkgs.pkg-config pkgs.wayland-scanner pkgs.autoPatchelfHook];
         buildInputs = [pkgs.wayland];
 
         buildPhase = ''
