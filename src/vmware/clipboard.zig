@@ -252,6 +252,36 @@ pub fn buildTransportMessage(
     return buf;
 }
 
+/// Result of parsing a clipboard transport message.
+pub const TransportMessage = struct {
+    header: HeaderV4,
+    payload: []const u8,
+};
+
+/// Parse a raw TCLO message into a V4 header and payload.
+///
+/// The message may optionally be prefixed with "copypaste.transport ".
+/// Returns error.InvalidPayload if the message is too short for a header.
+pub fn parseTransportMessage(data: []const u8) Error!TransportMessage {
+    var offset: usize = 0;
+
+    // Strip the transport prefix if present.
+    const prefix = RPCI_TRANSPORT_PREFIX;
+    if (data.len >= prefix.len and std.mem.eql(u8, data[0..prefix.len], prefix)) {
+        offset = prefix.len;
+    }
+
+    if (data.len - offset < HEADER_SIZE) return error.InvalidPayload;
+
+    const header = HeaderV4.decode(data[offset..][0..HEADER_SIZE]);
+    offset += HEADER_SIZE;
+
+    return .{
+        .header = header,
+        .payload = data[offset..],
+    };
+}
+
 // ---------------------------------------------------------------------------
 // Private helpers
 // ---------------------------------------------------------------------------
@@ -352,4 +382,33 @@ test "buildTransportMessage structure" {
 
     // Verify the payload follows the header
     try std.testing.expectEqualSlices(u8, payload, msg[prefix.len + HEADER_SIZE ..]);
+}
+
+test "parseTransportMessage round-trip with prefix" {
+    const hdr: HeaderV4 = .{ .cmd = CMD_RECV_CLIPBOARD, .src = SRC_HOST };
+    const payload = "data";
+    const msg = try buildTransportMessage(std.testing.allocator, &hdr, payload);
+    defer std.testing.allocator.free(msg);
+
+    const parsed = try parseTransportMessage(msg);
+    try std.testing.expectEqual(CMD_RECV_CLIPBOARD, parsed.header.cmd);
+    try std.testing.expectEqualSlices(u8, payload, parsed.payload);
+}
+
+test "parseTransportMessage without prefix" {
+    const hdr: HeaderV4 = .{ .cmd = CMD_SEND_CLIPBOARD };
+    const encoded = hdr.encode();
+    const payload = "raw";
+    var buf: [HEADER_SIZE + 3]u8 = undefined;
+    @memcpy(buf[0..HEADER_SIZE], &encoded);
+    @memcpy(buf[HEADER_SIZE..], payload);
+
+    const parsed = try parseTransportMessage(&buf);
+    try std.testing.expectEqual(CMD_SEND_CLIPBOARD, parsed.header.cmd);
+    try std.testing.expectEqualSlices(u8, payload, parsed.payload);
+}
+
+test "parseTransportMessage rejects too-short input" {
+    const short: []const u8 = "too short";
+    try std.testing.expectError(error.InvalidPayload, parseTransportMessage(short));
 }

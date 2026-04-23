@@ -150,6 +150,48 @@ pub fn Session(comptime Io: type) type {
             return result;
         }
 
+        // -- TCLO (host→guest) API ------------------------------------------
+
+        /// Poll for a pending host→guest message on this channel.
+        ///
+        /// Returns the raw message bytes if one is available, or null if the
+        /// channel has no pending data.  The caller owns the returned slice
+        /// and must free it with `allocator`.
+        ///
+        /// This implements the TCLO receive path: check reply length, read
+        /// data if present, and finish the reply.  The caller is responsible
+        /// for sending a response via `sendReply` after processing.
+        pub fn tryReceiveAlloc(
+            self: *Self,
+            allocator: Allocator,
+        ) Error!?[]u8 {
+            const header = try self.receiveReplyLength();
+            if (header.length == 0) return null;
+
+            const limits: platform.Limits = .{};
+            if (header.length > limits.max_rpc_reply_bytes) {
+                return error.ReplyTooLarge;
+            }
+
+            const buf = allocator.alloc(u8, header.length) catch {
+                return error.ReceiveFailed;
+            };
+            errdefer allocator.free(buf);
+
+            try self.receiveReplyData(header.reply_id, buf);
+            try self.finishReply(header.reply_id);
+            return buf;
+        }
+
+        /// Send a reply after processing a TCLO message.
+        ///
+        /// The response is typically "OK" or "ERROR" and is sent using the
+        /// same command-length/command-data sub-commands used for RPCI sends.
+        pub fn sendReply(self: *Self, response: []const u8) Error!void {
+            try self.sendCommandLength(response.len);
+            try self.sendCommandData(response);
+        }
+
         // -- Private helpers ------------------------------------------------
 
         fn sendCommandLength(self: *Self, length: usize) Error!void {
@@ -373,4 +415,86 @@ test "oversized reply rejected with ReplyTooLarge" {
 
     const result = session.transactAlloc(std.testing.allocator, "big");
     try std.testing.expectError(error.ReplyTooLarge, result);
+}
+
+test "tryReceiveAlloc returns null when no data pending" {
+    const channel_id: u16 = 0x0005;
+
+    var io: FakeIo = .{
+        .replies = &.{
+            // open
+            .{ .ecx = STATUS_OPEN_SUCCESS, .edx = @as(u32, channel_id) << 16 },
+            // receiveReplyLength: length=0 means nothing pending
+            .{
+                .ecx = STATUS_REPLY_LEN_SUCCESS,
+                .ebx = 0,
+                .edx = @as(u32, 0x0001) << 16,
+            },
+            // close
+            .{ .ecx = STATUS_CLOSE_SUCCESS },
+        },
+    };
+
+    var session = try Session(FakeIo).open(&io);
+    defer session.close();
+
+    const result = try session.tryReceiveAlloc(std.testing.allocator);
+    try std.testing.expect(result == null);
+}
+
+test "tryReceiveAlloc returns message when data pending" {
+    const channel_id: u16 = 0x0006;
+    const reply_id: u16 = 0x0010;
+
+    // "test" as a 4-byte LE u32
+    const data_word = std.mem.readInt(u32, "test", .little);
+
+    var io: FakeIo = .{
+        .replies = &.{
+            // open
+            .{ .ecx = STATUS_OPEN_SUCCESS, .edx = @as(u32, channel_id) << 16 },
+            // receiveReplyLength: 4 bytes pending
+            .{
+                .ecx = STATUS_REPLY_LEN_SUCCESS,
+                .ebx = 4,
+                .edx = @as(u32, reply_id) << 16,
+            },
+            // receiveReplyData
+            .{ .ecx = STATUS_REPLY_DATA_SUCCESS, .ebx = data_word },
+            // finishReply
+            .{ .ecx = STATUS_REPLY_FINISH_SUCCESS },
+            // close
+            .{ .ecx = STATUS_CLOSE_SUCCESS },
+        },
+    };
+
+    var session = try Session(FakeIo).open(&io);
+    defer session.close();
+
+    const result = try session.tryReceiveAlloc(std.testing.allocator);
+    defer std.testing.allocator.free(result.?);
+
+    try std.testing.expectEqualStrings("test", result.?);
+}
+
+test "sendReply transmits response" {
+    const channel_id: u16 = 0x0008;
+
+    var io: FakeIo = .{
+        .replies = &.{
+            // open
+            .{ .ecx = STATUS_OPEN_SUCCESS, .edx = @as(u32, channel_id) << 16 },
+            // sendCommandLength for "OK "
+            .{ .ecx = STATUS_COMMAND_LEN_SUCCESS },
+            // sendCommandData (1 chunk for "OK ")
+            .{ .ecx = STATUS_COMMAND_DATA_SUCCESS },
+            // close
+            .{ .ecx = STATUS_CLOSE_SUCCESS },
+        },
+    };
+
+    var session = try Session(FakeIo).open(&io);
+    defer session.close();
+
+    try session.sendReply("OK ");
 }

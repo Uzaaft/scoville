@@ -1,14 +1,14 @@
 //! Clipboard-specific RPCI polling layer.
 //!
-//! Wraps an RPCI session with VMware clipboard protocol logic: capability
-//! negotiation on init, polling for inbound clipboard data, and sending
-//! clipboard text to the VMware host. This module is the production adapter
-//! that bridges `backdoor.call` (real x86 I/O) with the generic `Session(Io)`
-//! transport.
+//! Wraps two RPCI sessions with VMware clipboard protocol logic:
+//!   - An RPCI session for guest→host commands (send clipboard, negotiate)
+//!   - A TCLO session for host→guest messages (receive clipboard)
 //!
-//! **Pinned type**: `Poller` contains a self-referential pointer (`session.io`
-//! points to `self.io`). Do not move a `Poller` after `init`; use it at a
-//! stable address (stack local or heap-allocated).
+//! The TCLO channel is polled each iteration; when the host pushes a
+//! clipboard transport message, it is parsed and returned as a bridge event.
+//!
+//! **Pinned type**: contains self-referential pointers (`session.io` points
+//! to `self.io`). Do not move a `Poller` after `init`.
 
 const std = @import("std");
 const backdoor = @import("backdoor.zig");
@@ -19,6 +19,9 @@ const bridge_state = @import("../bridge/state.zig");
 const Allocator = std.mem.Allocator;
 
 const log = std.log.scoped(.vmware_poller);
+
+/// TCLO reply sent after successfully processing a host command.
+const TCLO_REPLY_OK = "OK ";
 
 // ---------------------------------------------------------------------------
 // I/O adapter
@@ -44,60 +47,105 @@ pub const Error = rpci.Error || clipboard.Error || Allocator.Error;
 // Poller
 // ---------------------------------------------------------------------------
 
-/// RPCI session wrapper for VMware clipboard operations.
+/// Bidirectional VMware clipboard transport.
 ///
-/// Manages the lifecycle of a GuestRPC channel configured for V4 clipboard
-/// capability, and provides `poll` / `sendClipboard` for the event loop.
+/// Uses one GuestRPC channel for outbound RPCI commands and a second
+/// channel for inbound TCLO messages from the hypervisor.
 pub const Poller = struct {
-    session: rpci.Session(BackdoorIo),
-    io: BackdoorIo,
+    rpci_session: rpci.Session(BackdoorIo),
+    tclo_session: rpci.Session(BackdoorIo),
+    rpci_io: BackdoorIo,
+    tclo_io: BackdoorIo,
     allocator: Allocator,
     pending_text: ?[]u8,
 
-    /// Open a GuestRPC channel and negotiate V4 clipboard capability.
-    ///
-    /// The returned `Poller` must not be moved after construction (see module
-    /// doc comment). Caller must call `deinit` when done.
+    /// Open both channels and negotiate V4 clipboard capability.
     pub fn init(allocator: Allocator) Error!Poller {
-        var io: BackdoorIo = .{};
-        var session = try rpci.Session(BackdoorIo).open(&io);
+        var rpci_io: BackdoorIo = .{};
+        var rpci_session = try rpci.Session(BackdoorIo).open(&rpci_io);
 
-        const reply = try session.transactAlloc(allocator, clipboard.RPCI_SET_CP_VERSION);
-        allocator.free(reply);
+        const cap_reply = try rpci_session.transactAlloc(allocator, clipboard.RPCI_SET_CP_VERSION);
+        allocator.free(cap_reply);
+
+        var tclo_io: BackdoorIo = .{};
+        const tclo_session = rpci.Session(BackdoorIo).open(&tclo_io) catch |err| {
+            rpci_session.close();
+            return err;
+        };
 
         return .{
-            .session = session,
-            .io = io,
+            .rpci_session = rpci_session,
+            .tclo_session = tclo_session,
+            .rpci_io = rpci_io,
+            .tclo_io = tclo_io,
             .allocator = allocator,
             .pending_text = null,
         };
     }
 
-    /// Release resources and close the GuestRPC channel.
+    /// Release resources and close both GuestRPC channels.
     pub fn deinit(self: *Poller) void {
         if (self.pending_text) |text| {
             self.allocator.free(text);
             self.pending_text = null;
         }
-        self.session.close();
+        self.tclo_session.close();
+        self.rpci_session.close();
     }
 
-    /// Check for an inbound clipboard event from the VMware host.
+    /// Poll the TCLO channel for an inbound clipboard message.
     ///
-    /// Currently a stub that always returns null. The real VMware clipboard
-    /// path is interrupt-driven via TCLO/GuestRPC message delivery, which
-    /// will be wired in a later iteration. This scaffolding lets the event
-    /// loop compile and run without the TCLO plumbing.
+    /// Returns a bridge event if the host pushed clipboard data, or null
+    /// if the channel is idle.  On receipt, acknowledges with "OK ".
     pub fn poll(self: *Poller) Error!?bridge_state.Event {
-        _ = self;
-        return null;
+        const raw = try self.tclo_session.tryReceiveAlloc(self.allocator) orelse
+            return null;
+        defer self.allocator.free(raw);
+
+        self.tclo_session.sendReply(TCLO_REPLY_OK) catch |err| {
+            log.err("TCLO reply failed: {}", .{err});
+            return err;
+        };
+
+        return self.handleTcloMessage(raw);
+    }
+
+    /// Parse a raw TCLO message and extract clipboard text if present.
+    fn handleTcloMessage(self: *Poller, raw: []const u8) Error!?bridge_state.Event {
+        const msg = clipboard.parseTransportMessage(raw) catch {
+            log.debug("ignoring non-clipboard TCLO message ({d} bytes)", .{raw.len});
+            return null;
+        };
+
+        if (msg.header.msg_type != clipboard.MSG_TYPE_CP) return null;
+
+        return switch (msg.header.cmd) {
+            clipboard.CMD_RECV_CLIPBOARD => self.handleRecvClipboard(msg.payload),
+            else => null,
+        };
+    }
+
+    /// Decode a CMD_RECV_CLIPBOARD payload into a bridge event.
+    fn handleRecvClipboard(self: *Poller, payload: []const u8) Error!?bridge_state.Event {
+        const text = clipboard.deserializeClipboard(payload) catch |err| {
+            log.err("clipboard deserialization failed: {}", .{err});
+            return null;
+        };
+        if (text.len == 0) return null;
+
+        // Replace pending_text with a copy of the received text.
+        if (self.pending_text) |old| self.allocator.free(old);
+        const owned = self.allocator.dupe(u8, text) catch return error.OutOfMemory;
+        self.pending_text = owned;
+
+        return .{
+            .origin = .vmware,
+            .selection = .clipboard,
+            .payload = .{ .text = owned },
+        };
     }
 
     /// Send clipboard text to the VMware host via RPCI transport.
-    ///
-    /// Serializes `text` into the V4 CPClipboard wire format, wraps it
-    /// in a transport message with a CMD_SEND_CLIPBOARD header, and sends
-    /// it through the GuestRPC channel.
     pub fn sendClipboard(self: *Poller, text: []const u8) Error!void {
         const cp_payload = try clipboard.serializeClipboard(self.allocator, text);
         defer self.allocator.free(cp_payload);
@@ -111,14 +159,14 @@ pub const Poller = struct {
             .payload_size = @intCast(cp_payload.len),
         };
 
-        const transport_msg = try clipboard.buildTransportMessage(
+        const transport = try clipboard.buildTransportMessage(
             self.allocator,
             &header,
             cp_payload,
         );
-        defer self.allocator.free(transport_msg);
+        defer self.allocator.free(transport);
 
-        const reply = try self.session.transactAlloc(self.allocator, transport_msg);
+        const reply = try self.rpci_session.transactAlloc(self.allocator, transport);
         self.allocator.free(reply);
     }
 };
