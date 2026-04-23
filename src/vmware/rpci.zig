@@ -33,18 +33,16 @@ const SUBCMD_REPLY_DATA: u16 = 0x04;
 const SUBCMD_REPLY_FINISH: u16 = 0x05;
 const SUBCMD_CLOSE: u16 = 0x06;
 
-/// Expected full-ECX values on success for each sub-command.
-const STATUS_OPEN_SUCCESS: u32 = 0x0001_0000;
-const STATUS_COMMAND_LEN_SUCCESS: u32 = 0x0081_0000;
-const STATUS_COMMAND_DATA_SUCCESS: u32 = 0x0001_0000;
-const STATUS_REPLY_LEN_SUCCESS: u32 = 0x0083_0000;
-const STATUS_REPLY_DATA_SUCCESS: u32 = 0x0001_0000;
-const STATUS_REPLY_FINISH_SUCCESS: u32 = 0x0001_0000;
-const STATUS_CLOSE_SUCCESS: u32 = 0x0001_0000;
-
-/// GuestRPC status flag bits returned in the high byte of ECX.
+/// GuestRPC status flag bits returned in the high 16 bits of ECX.
+/// open-vm-tools checks only these bits, not exact ECX values, because
+/// different VMware versions set different combinations of HB/CPT flags.
 const STATUS_SUCCESS: u32 = 0x0001;
 const STATUS_DORECV: u32 = 0x0002;
+
+/// Returns true when the SUCCESS bit is set in the ECX status word.
+fn statusOk(ecx: u32) bool {
+    return (ecx >> 16) & STATUS_SUCCESS != 0;
+}
 
 /// Reply status prefix indicating success ("1 " as little-endian u16).
 const RPC_SUCCESS_PREFIX: u16 = 0x2031;
@@ -89,7 +87,7 @@ pub fn Session(comptime Io: type) type {
                 .ebx = GUESTRPC_MAGIC,
             });
 
-            if (reply.ecx != STATUS_OPEN_SUCCESS) {
+            if (!statusOk(reply.ecx)) {
                 return error.ChannelOpenFailed;
             }
 
@@ -214,7 +212,7 @@ pub fn Session(comptime Io: type) type {
                 .ebx = @truncate(length),
             });
 
-            if (reply.ecx != STATUS_COMMAND_LEN_SUCCESS) {
+            if (!statusOk(reply.ecx)) {
                 return error.SendFailed;
             }
         }
@@ -235,7 +233,7 @@ pub fn Session(comptime Io: type) type {
                     .ebx = word,
                 });
 
-                if (reply.ecx != STATUS_COMMAND_DATA_SUCCESS) {
+                if (!statusOk(reply.ecx)) {
                     return error.SendFailed;
                 }
 
@@ -254,7 +252,7 @@ pub fn Session(comptime Io: type) type {
                 .edx = self.makeEdx(),
             });
 
-            if (reply.ecx != STATUS_REPLY_LEN_SUCCESS) {
+            if (!statusOk(reply.ecx)) {
                 return error.ReceiveFailed;
             }
 
@@ -277,7 +275,7 @@ pub fn Session(comptime Io: type) type {
                     .ebx = @as(u32, reply_id),
                 });
 
-                if (reply.ecx != STATUS_REPLY_DATA_SUCCESS) {
+                if (!statusOk(reply.ecx)) {
                     return error.ReceiveFailed;
                 }
 
@@ -299,7 +297,7 @@ pub fn Session(comptime Io: type) type {
                 .ebx = @as(u32, reply_id),
             });
 
-            if (reply.ecx != STATUS_REPLY_FINISH_SUCCESS) {
+            if (!statusOk(reply.ecx)) {
                 return error.ReceiveFailed;
             }
         }
@@ -338,9 +336,9 @@ test "open and close" {
     var io: FakeIo = .{
         .replies = &.{
             // open reply: success, channel in EDX high word
-            .{ .ecx = STATUS_OPEN_SUCCESS, .edx = @as(u32, channel_id) << 16 },
+            .{ .ecx = (STATUS_SUCCESS << 16), .edx = @as(u32, channel_id) << 16 },
             // close reply: success (ignored)
-            .{ .ecx = STATUS_CLOSE_SUCCESS },
+            .{ .ecx = (STATUS_SUCCESS << 16) },
         },
     };
 
@@ -353,7 +351,7 @@ test "open and close" {
 
 test "open fails on bad status" {
     var io: FakeIo = .{ .replies = &.{
-        .{ .ecx = 0xDEAD_0000 },
+        .{ .ecx = 0x0000_0000 },
     } };
 
     const result = Session(FakeIo).open(&io);
@@ -371,23 +369,23 @@ test "transactAlloc with short reply" {
     var io: FakeIo = .{
         .replies = &.{
             // open
-            .{ .ecx = STATUS_OPEN_SUCCESS, .edx = @as(u32, channel_id) << 16 },
+            .{ .ecx = (STATUS_SUCCESS << 16), .edx = @as(u32, channel_id) << 16 },
             // sendCommandLength
-            .{ .ecx = STATUS_COMMAND_LEN_SUCCESS },
+            .{ .ecx = (STATUS_SUCCESS << 16) },
             // sendCommandData (1 chunk for "ping")
-            .{ .ecx = STATUS_COMMAND_DATA_SUCCESS },
+            .{ .ecx = (STATUS_SUCCESS << 16) },
             // receiveReplyLength: 4 bytes, reply_id in edx high
             .{
-                .ecx = STATUS_REPLY_LEN_SUCCESS,
+                .ecx = ((STATUS_SUCCESS | STATUS_DORECV) << 16),
                 .ebx = 4,
                 .edx = @as(u32, reply_id) << 16,
             },
             // receiveReplyData (1 chunk)
-            .{ .ecx = STATUS_REPLY_DATA_SUCCESS, .ebx = reply_word },
+            .{ .ecx = (STATUS_SUCCESS << 16), .ebx = reply_word },
             // finishReply
-            .{ .ecx = STATUS_REPLY_FINISH_SUCCESS },
+            .{ .ecx = (STATUS_SUCCESS << 16) },
             // close
-            .{ .ecx = STATUS_CLOSE_SUCCESS },
+            .{ .ecx = (STATUS_SUCCESS << 16) },
         },
     };
 
@@ -407,19 +405,19 @@ test "oversized reply rejected with ReplyTooLarge" {
     var io: FakeIo = .{
         .replies = &.{
             // open
-            .{ .ecx = STATUS_OPEN_SUCCESS, .edx = @as(u32, channel_id) << 16 },
+            .{ .ecx = (STATUS_SUCCESS << 16), .edx = @as(u32, channel_id) << 16 },
             // sendCommandLength
-            .{ .ecx = STATUS_COMMAND_LEN_SUCCESS },
+            .{ .ecx = (STATUS_SUCCESS << 16) },
             // sendCommandData (1 chunk for "big")
-            .{ .ecx = STATUS_COMMAND_DATA_SUCCESS },
+            .{ .ecx = (STATUS_SUCCESS << 16) },
             // receiveReplyLength: exceeds limit
             .{
-                .ecx = STATUS_REPLY_LEN_SUCCESS,
+                .ecx = ((STATUS_SUCCESS | STATUS_DORECV) << 16),
                 .ebx = @truncate(limits.max_rpc_reply_bytes + 1),
                 .edx = @as(u32, 0x0099) << 16,
             },
             // close (after error, caller closes)
-            .{ .ecx = STATUS_CLOSE_SUCCESS },
+            .{ .ecx = (STATUS_SUCCESS << 16) },
         },
     };
 
@@ -436,11 +434,11 @@ test "tryReceiveAlloc returns null when no data pending" {
     var io: FakeIo = .{
         .replies = &.{
             // open
-            .{ .ecx = STATUS_OPEN_SUCCESS, .edx = @as(u32, channel_id) << 16 },
+            .{ .ecx = (STATUS_SUCCESS << 16), .edx = @as(u32, channel_id) << 16 },
             // REPLY_LEN: success but no DORECV bit (no data pending)
             .{ .ecx = STATUS_SUCCESS << 16 },
             // close
-            .{ .ecx = STATUS_CLOSE_SUCCESS },
+            .{ .ecx = (STATUS_SUCCESS << 16) },
         },
     };
 
@@ -461,7 +459,7 @@ test "tryReceiveAlloc returns message when data pending" {
     var io: FakeIo = .{
         .replies = &.{
             // open
-            .{ .ecx = STATUS_OPEN_SUCCESS, .edx = @as(u32, channel_id) << 16 },
+            .{ .ecx = (STATUS_SUCCESS << 16), .edx = @as(u32, channel_id) << 16 },
             // REPLY_LEN: success + DORECV, 4 bytes pending
             .{
                 .ecx = (STATUS_SUCCESS | STATUS_DORECV) << 16,
@@ -469,11 +467,11 @@ test "tryReceiveAlloc returns message when data pending" {
                 .edx = @as(u32, reply_id) << 16,
             },
             // receiveReplyData
-            .{ .ecx = STATUS_REPLY_DATA_SUCCESS, .ebx = data_word },
+            .{ .ecx = (STATUS_SUCCESS << 16), .ebx = data_word },
             // finishReply
-            .{ .ecx = STATUS_REPLY_FINISH_SUCCESS },
+            .{ .ecx = (STATUS_SUCCESS << 16) },
             // close
-            .{ .ecx = STATUS_CLOSE_SUCCESS },
+            .{ .ecx = (STATUS_SUCCESS << 16) },
         },
     };
 
@@ -492,13 +490,13 @@ test "sendReply transmits response" {
     var io: FakeIo = .{
         .replies = &.{
             // open
-            .{ .ecx = STATUS_OPEN_SUCCESS, .edx = @as(u32, channel_id) << 16 },
+            .{ .ecx = (STATUS_SUCCESS << 16), .edx = @as(u32, channel_id) << 16 },
             // sendCommandLength for "OK "
-            .{ .ecx = STATUS_COMMAND_LEN_SUCCESS },
+            .{ .ecx = (STATUS_SUCCESS << 16) },
             // sendCommandData (1 chunk for "OK ")
-            .{ .ecx = STATUS_COMMAND_DATA_SUCCESS },
+            .{ .ecx = (STATUS_SUCCESS << 16) },
             // close
-            .{ .ecx = STATUS_CLOSE_SUCCESS },
+            .{ .ecx = (STATUS_SUCCESS << 16) },
         },
     };
 
