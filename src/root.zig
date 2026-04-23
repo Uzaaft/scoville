@@ -7,6 +7,7 @@
 const std = @import("std");
 
 test {
+    _ = @import("platform.zig");
     // Register submodule tests here as the project grows:
     // _ = @import("vmware/backdoor.zig");
     // _ = @import("wayland/clipboard.zig");
