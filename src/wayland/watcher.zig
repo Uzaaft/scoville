@@ -237,7 +237,7 @@ fn receiveSelection(self: *Watcher) void {
         return;
     }
 
-    log.debug("received {d} bytes from wayland clipboard", .{text.len});
+    log.info("received {d} bytes from wayland clipboard", .{text.len});
     self.pending_event = .{
         .origin = .wayland,
         .selection = .clipboard,

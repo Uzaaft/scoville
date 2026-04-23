@@ -35,16 +35,16 @@ pub const Runtime = struct {
     pub fn dispatch(self: *Runtime, action: state.Action) Error!void {
         switch (action) {
             .push_vmware => |data| {
-                log.debug("sending {d} bytes to vmware host", .{data.text.len});
+                log.info("sending {d} bytes to vmware host", .{data.text.len});
                 try self.poller.sendClipboard(data.text);
             },
             .push_wayland => |data| {
                 const serial = self.serial_tracker.lastSerial();
-                log.debug("publishing {d} bytes to wayland, serial={d}", .{ data.text.len, serial });
+                log.info("publishing {d} bytes to wayland, serial={d}", .{ data.text.len, serial });
                 try self.publisher.publish(data.text, serial);
             },
             .clear_wayland => {
-                log.debug("clearing wayland selection", .{});
+                log.info("clearing wayland selection", .{});
                 self.publisher.clear();
             },
             .clear_vmware => |sel| {
