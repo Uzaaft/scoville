@@ -10,6 +10,7 @@ test {
     _ = @import("platform.zig");
     _ = @import("vmware/backdoor.zig");
     _ = @import("vmware/rpci.zig");
+    _ = @import("vmware/clipboard.zig");
     _ = @import("wayland/c.zig");
     _ = @import("wayland/client.zig");
 }
