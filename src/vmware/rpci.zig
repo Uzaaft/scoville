@@ -109,13 +109,18 @@ pub fn Session(comptime Io: type) type {
         ///
         /// The caller owns the returned slice and must free it with `allocator`.
         /// The 2-byte status prefix is validated and stripped from the result.
+        ///
+        /// The command length sent to the hypervisor includes a trailing NUL
+        /// byte, matching open-vm-tools' `strlen(msg) + 1` convention.
         pub fn transactAlloc(
             self: *Self,
             allocator: Allocator,
             command: []const u8,
         ) Error![]u8 {
-            try self.sendCommandLength(command.len);
+            try self.sendCommandLength(command.len + 1);
             try self.sendCommandData(command);
+            // Send the NUL terminator as a final chunk.
+            try self.sendCommandData(&.{0});
 
             const reply_header = try self.receiveReplyLength();
             const reply_id = reply_header.reply_id;
@@ -374,6 +379,8 @@ test "transactAlloc with short reply" {
             .{ .ecx = (STATUS_SUCCESS << 16) },
             // sendCommandData (1 chunk for "ping")
             .{ .ecx = (STATUS_SUCCESS << 16) },
+            // sendCommandData (NUL terminator)
+            .{ .ecx = (STATUS_SUCCESS << 16) },
             // receiveReplyLength: 4 bytes, reply_id in edx high
             .{
                 .ecx = ((STATUS_SUCCESS | STATUS_DORECV) << 16),
@@ -409,6 +416,8 @@ test "oversized reply rejected with ReplyTooLarge" {
             // sendCommandLength
             .{ .ecx = (STATUS_SUCCESS << 16) },
             // sendCommandData (1 chunk for "big")
+            .{ .ecx = (STATUS_SUCCESS << 16) },
+            // sendCommandData (NUL terminator)
             .{ .ecx = (STATUS_SUCCESS << 16) },
             // receiveReplyLength: exceeds limit
             .{

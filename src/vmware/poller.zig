@@ -49,55 +49,40 @@ pub const Error = rpci.Error || clipboard.Error || Allocator.Error;
 
 /// Bidirectional VMware clipboard transport.
 ///
-/// Uses one GuestRPC channel for outbound RPCI commands and a second
-/// channel for inbound TCLO messages from the hypervisor.
+/// RPCI commands (guest→host) open a fresh channel per call, matching
+/// open-vm-tools' `RpcOut_sendOne` pattern.  The TCLO channel
+/// (host→guest) is kept open persistently for polling.
 ///
-/// **Must be heap-allocated** (or pinned on the stack) because the RPCI
-/// sessions hold pointers into `rpci_io` / `tclo_io`.  Call `create`
-/// instead of constructing directly.
+/// **Must be heap-allocated** because the TCLO session holds a pointer
+/// into `tclo_io`.  Call `create` instead of constructing directly.
 pub const Poller = struct {
-    rpci_session: rpci.Session(BackdoorIo),
     tclo_session: rpci.Session(BackdoorIo),
-    rpci_io: BackdoorIo,
     tclo_io: BackdoorIo,
     allocator: Allocator,
     pending_text: ?[]u8,
 
-    /// Heap-allocate a Poller, open both channels, and negotiate V4
-    /// clipboard capability.  Returns a stable pointer whose sessions
-    /// reference the struct's own io fields.
+    /// Heap-allocate a Poller, negotiate capabilities, and open the
+    /// TCLO channel for host→guest clipboard messages.
     pub fn create(allocator: Allocator) Error!*Poller {
         const self = allocator.create(Poller) catch return error.OutOfMemory;
         errdefer allocator.destroy(self);
 
         self.* = .{
-            .rpci_session = undefined,
             .tclo_session = undefined,
-            .rpci_io = .{},
             .tclo_io = .{},
             .allocator = allocator,
             .pending_text = null,
         };
 
-        log.info("opening RPCI channel", .{});
-        self.rpci_session = rpci.Session(BackdoorIo).open(&self.rpci_io) catch |err| {
-            log.err("RPCI channel open failed: {s}", .{@errorName(err)});
-            return err;
-        };
-
         log.info("negotiating clipboard V4 capability", .{});
-        const cap_reply = self.rpci_session.transactAlloc(allocator, clipboard.RPCI_SET_CP_VERSION) catch |err| {
+        sendOneShot(allocator, clipboard.RPCI_SET_CP_VERSION) catch |err| {
             log.err("capability negotiation failed: {s}", .{@errorName(err)});
-            self.rpci_session.close();
             return err;
         };
-        log.debug("capability reply: {d} bytes", .{cap_reply.len});
-        allocator.free(cap_reply);
 
         log.info("opening TCLO channel", .{});
         self.tclo_session = rpci.Session(BackdoorIo).open(&self.tclo_io) catch |err| {
             log.err("TCLO channel open failed: {s}", .{@errorName(err)});
-            self.rpci_session.close();
             return err;
         };
 
@@ -105,12 +90,11 @@ pub const Poller = struct {
         return self;
     }
 
-    /// Release resources, close both GuestRPC channels, and free the
-    /// heap allocation created by `create`.
+    /// Release resources, close the TCLO channel, and free the heap
+    /// allocation created by `create`.
     pub fn destroy(self: *Poller) void {
         if (self.pending_text) |text| self.allocator.free(text);
         self.tclo_session.close();
-        self.rpci_session.close();
         self.allocator.destroy(self);
     }
 
@@ -124,7 +108,7 @@ pub const Poller = struct {
         defer self.allocator.free(raw);
 
         self.tclo_session.sendReply(TCLO_REPLY_OK) catch |err| {
-            log.err("TCLO reply failed: {}", .{err});
+            log.err("TCLO reply failed: {s}", .{@errorName(err)});
             return err;
         };
 
@@ -189,10 +173,28 @@ pub const Poller = struct {
         );
         defer self.allocator.free(transport);
 
-        const reply = try self.rpci_session.transactAlloc(self.allocator, transport);
-        self.allocator.free(reply);
+        sendOneShot(self.allocator, transport) catch |err| {
+            log.err("sendClipboard RPCI failed: {s}", .{@errorName(err)});
+            return err;
+        };
     }
 };
+
+// ---------------------------------------------------------------------------
+// One-shot RPCI (open → send → receive → close)
+// ---------------------------------------------------------------------------
+
+/// Open a fresh GuestRPC channel, send one command, read the reply,
+/// and close.  Matches open-vm-tools' `RpcOut_sendOne` pattern which
+/// avoids channel-timeout issues from the hypervisor.
+fn sendOneShot(allocator: Allocator, command: []const u8) Error!void {
+    var io: BackdoorIo = .{};
+    var session = try rpci.Session(BackdoorIo).open(&io);
+    defer session.close();
+
+    const reply = try session.transactAlloc(allocator, command);
+    allocator.free(reply);
+}
 
 // ---------------------------------------------------------------------------
 // Tests
