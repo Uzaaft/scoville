@@ -92,15 +92,25 @@ pub fn Session(comptime Io: type) type {
         /// Tries cookie-authenticated mode first (GUESTMSG_FLAG_COOKIE),
         /// falling back to legacy mode if the hypervisor rejects it.
         pub fn open(io: *Io) Error!Self {
+            const log = std.log.scoped(.rpci);
+
             // Try with cookie flag first (modern VMware).
             const reply = io.call(.{
                 .ecx = makeEcx(SUBCMD_OPEN),
                 .ebx = GUESTRPC_MAGIC | GUESTMSG_FLAG_COOKIE,
             }) catch |err| return err;
 
+            log.debug("OPEN(cookie): ecx=0x{x:0>8} edx=0x{x:0>8} esi=0x{x:0>8} edi=0x{x:0>8}", .{
+                reply.ecx, reply.edx, reply.esi, reply.edi,
+            });
+
             if (statusOk(reply.ecx)) {
+                const ch: u16 = @truncate(reply.edx >> 16);
+                log.debug("channel opened: id={d} cookie=0x{x:0>8}:0x{x:0>8}", .{
+                    ch, reply.esi, reply.edi,
+                });
                 return .{
-                    .channel_id = @truncate(reply.edx >> 16),
+                    .channel_id = ch,
                     .cookie_high = reply.esi,
                     .cookie_low = reply.edi,
                     .io = io,
@@ -108,10 +118,13 @@ pub fn Session(comptime Io: type) type {
             }
 
             // Fallback: open without cookie flag (legacy VMware).
+            log.debug("cookie open failed, trying legacy", .{});
             const legacy = io.call(.{
                 .ecx = makeEcx(SUBCMD_OPEN),
                 .ebx = GUESTRPC_MAGIC,
             }) catch |err| return err;
+
+            log.debug("OPEN(legacy): ecx=0x{x:0>8}", .{legacy.ecx});
 
             if (!statusOk(legacy.ecx)) {
                 return error.ChannelOpenFailed;
@@ -245,14 +258,20 @@ pub fn Session(comptime Io: type) type {
         // -- Private helpers ------------------------------------------------
 
         fn sendCommandLength(self: *Self, length: usize) Error!void {
+            const log = std.log.scoped(.rpci);
+            const edx = self.makeEdx();
+            log.debug("SENDSIZE: len={d} edx=0x{x:0>8} esi=0x{x:0>8} edi=0x{x:0>8}", .{
+                length, edx, self.cookie_high, self.cookie_low,
+            });
             const reply = try self.io.call(.{
                 .ecx = makeEcx(SUBCMD_COMMAND_LEN),
-                .edx = self.makeEdx(),
+                .edx = edx,
                 .ebx = @truncate(length),
                 .esi = self.cookie_high,
                 .edi = self.cookie_low,
             });
 
+            log.debug("SENDSIZE reply: ecx=0x{x:0>8}", .{reply.ecx});
             if (!statusOk(reply.ecx)) {
                 return error.SendFailed;
             }
