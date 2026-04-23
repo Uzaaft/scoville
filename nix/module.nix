@@ -31,8 +31,8 @@ in {
   config = lib.mkIf cfg.enable {
     assertions = [
       {
-        assertion = pkgs.stdenv.hostPlatform.isx86_64 && pkgs.stdenv.isLinux;
-        message = "scoville requires x86_64-linux (VMware backdoor uses I/O port 0x5658)";
+        assertion = (pkgs.stdenv.hostPlatform.isx86_64 || pkgs.stdenv.hostPlatform.isAarch64) && pkgs.stdenv.isLinux;
+        message = "scoville requires x86_64-linux or aarch64-linux";
       }
     ];
 

@@ -1,7 +1,8 @@
 //! Platform constraints and hard limits for Scoville.
 //!
-//! Scoville requires x86_64 Linux because the VMware backdoor uses
-//! I/O port 0x5658 which is only accessible via x86 inline assembly.
+//! Scoville requires Linux on x86_64 or aarch64.  On x86_64 the VMware
+//! backdoor uses I/O port 0x5658 via `inl`; on aarch64 it traps on a
+//! read of the MDCCSR_EL0 debug register.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -17,9 +18,9 @@ pub const Limits = struct {
 };
 
 /// Returns true when the given arch+os combination supports the VMware
-/// backdoor I/O port (x86 `in`/`out` on Linux).
+/// backdoor (x86_64 via I/O port, aarch64 via MDCCSR_EL0 trap).
 pub fn supportsVmwareBackdoor(arch: std.Target.Cpu.Arch, os_tag: std.Target.Os.Tag) bool {
-    return arch == .x86_64 and os_tag == .linux;
+    return (arch == .x86_64 or arch == .aarch64) and os_tag == .linux;
 }
 
 /// Asserts at comptime that the current target can use the VMware backdoor.
@@ -39,8 +40,8 @@ test "supportsVmwareBackdoor accepts x86_64 linux" {
     try std.testing.expect(supportsVmwareBackdoor(.x86_64, .linux));
 }
 
-test "supportsVmwareBackdoor rejects aarch64 linux" {
-    try std.testing.expect(!supportsVmwareBackdoor(.aarch64, .linux));
+test "supportsVmwareBackdoor accepts aarch64 linux" {
+    try std.testing.expect(supportsVmwareBackdoor(.aarch64, .linux));
 }
 
 test "supportsVmwareBackdoor rejects x86_64 windows" {
