@@ -162,10 +162,8 @@ pub fn Session(comptime Io: type) type {
             allocator: Allocator,
             command: []const u8,
         ) Error![]u8 {
-            try self.sendCommandLength(command.len + 1);
+            try self.sendCommandLength(command.len);
             try self.sendCommandData(command);
-            // Send the NUL terminator as a final chunk.
-            try self.sendCommandData(&.{0});
 
             const reply_header = try self.receiveReplyLength();
             const reply_id = reply_header.reply_id;
