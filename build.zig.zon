@@ -1,0 +1,11 @@
+.{
+    .name = .scoville,
+    .version = "0.1.0",
+    .fingerprint = 0x81e08c33a0646c25,
+    .minimum_zig_version = "0.14.0",
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+    },
+}
