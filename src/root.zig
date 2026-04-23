@@ -15,4 +15,6 @@ test {
     _ = @import("wayland/client.zig");
     _ = @import("wayland/clipboard.zig");
     _ = @import("wayland/source.zig");
+    _ = @import("bridge/state.zig");
+    _ = @import("bridge/sync.zig");
 }
