@@ -71,25 +71,6 @@
       };
     });
 
-    nixosModules.default = {
-      config,
-      lib,
-      pkgs,
-      ...
-    }: let
-      cfg = config.services.scoville;
-    in {
-      options.services.scoville = {
-        enable = lib.mkEnableOption "Scoville VMware clipboard bridge for Wayland";
-      };
-
-      config = lib.mkIf cfg.enable {
-        # Ensure the VMware guest kernel modules are loaded
-        virtualisation.vmware.guest.enable = true;
-
-        # TODO: add a systemd user service that runs the scoville daemon
-        # once the binary is functional
-      };
-    };
+    nixosModules.default = import ./nix/module.nix;
   };
 }
