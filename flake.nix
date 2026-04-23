@@ -35,7 +35,8 @@
       default = pkgs.stdenv.mkDerivation {
         name = "scoville";
         src = ./.;
-        nativeBuildInputs = [zig];
+        nativeBuildInputs = [zig pkgs.pkg-config pkgs.wayland-scanner];
+        buildInputs = [pkgs.wayland];
 
         buildPhase = ''
           export ZIG_GLOBAL_CACHE_DIR=$TMPDIR/zig-cache
@@ -62,6 +63,10 @@
           zls
           zigdoc
           ziglint
+          pkgs.wayland
+          pkgs.wayland-scanner
+          pkgs.wayland-protocols
+          pkgs.pkg-config
         ];
       };
     });

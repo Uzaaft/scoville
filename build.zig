@@ -4,14 +4,48 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
+    // Generate primary-selection protocol header and C source via wayland-scanner
+    const wl_generate_header = b.addSystemCommand(&.{
+        "wayland-scanner", "client-header",
+    });
+    wl_generate_header.addFileArg(b.path("protocols/primary-selection-unstable-v1.xml"));
+    const primary_sel_header = wl_generate_header.addOutputFileArg("primary-selection-unstable-v1-client-protocol.h");
+
+    const wl_generate_code = b.addSystemCommand(&.{
+        "wayland-scanner", "private-code",
+    });
+    wl_generate_code.addFileArg(b.path("protocols/primary-selection-unstable-v1.xml"));
+    const primary_sel_code = wl_generate_code.addOutputFileArg("primary-selection-unstable-v1-protocol.c");
+
+    // Translate the C header into a Zig module (replaces @cImport)
+    const translate_c = b.addTranslateC(.{
+        .root_source_file = b.path("src/wayland/c.h"),
+        .target = target,
+        .optimize = optimize,
+    });
+    translate_c.addIncludePath(primary_sel_header.dirname());
+    translate_c.linkSystemLibrary("wayland-client", .{});
+
     // Library module
     const lib_mod = b.addModule("scoville", .{
         .root_source_file = b.path("src/root.zig"),
         .target = target,
         .optimize = optimize,
+        .imports = &.{
+            .{ .name = "c", .module = translate_c.createModule() },
+        },
     });
 
-    // Static library artifact for C interop / linking
+    // Compile the generated protocol glue C code
+    lib_mod.addCSourceFile(.{
+        .file = primary_sel_code,
+    });
+
+    // Link wayland-client and libc
+    lib_mod.linkSystemLibrary("wayland-client", .{});
+    lib_mod.link_libc = true;
+
+    // Static library artifact
     const lib = b.addLibrary(.{
         .linkage = .static,
         .name = "scoville",
