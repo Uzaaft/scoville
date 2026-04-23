@@ -13,4 +13,6 @@ test {
     _ = @import("vmware/clipboard.zig");
     _ = @import("wayland/c.zig");
     _ = @import("wayland/client.zig");
+    _ = @import("wayland/clipboard.zig");
+    _ = @import("wayland/source.zig");
 }
