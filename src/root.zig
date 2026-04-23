@@ -21,5 +21,6 @@ test {
     _ = @import("vmware/poller.zig");
     _ = @import("bridge/state.zig");
     _ = @import("bridge/sync.zig");
+    _ = @import("bridge/executor.zig");
     _ = @import("daemon.zig");
 }
