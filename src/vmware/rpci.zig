@@ -39,6 +39,11 @@ const SUBCMD_CLOSE: u16 = 0x06;
 const STATUS_SUCCESS: u32 = 0x0001;
 const STATUS_DORECV: u32 = 0x0002;
 
+/// Cookie flag ORed into EBX during OPEN to request authenticated channels.
+/// Modern VMware requires this; the hypervisor returns cookie values in
+/// ESI/EDI that must accompany all subsequent calls on the channel.
+const GUESTMSG_FLAG_COOKIE: u32 = 0x80000000;
+
 /// Returns true when the SUCCESS bit is set in the ECX status word.
 fn statusOk(ecx: u32) bool {
     return (ecx >> 16) & STATUS_SUCCESS != 0;
@@ -76,23 +81,48 @@ pub fn Session(comptime Io: type) type {
         const Self = @This();
 
         channel_id: u16,
+        cookie_high: u32,
+        cookie_low: u32,
         io: *Io,
 
         // -- Lifecycle ------------------------------------------------------
 
         /// Open a new GuestRPC channel on the hypervisor.
+        ///
+        /// Tries cookie-authenticated mode first (GUESTMSG_FLAG_COOKIE),
+        /// falling back to legacy mode if the hypervisor rejects it.
         pub fn open(io: *Io) Error!Self {
-            const reply = try io.call(.{
+            // Try with cookie flag first (modern VMware).
+            const reply = io.call(.{
+                .ecx = makeEcx(SUBCMD_OPEN),
+                .ebx = GUESTRPC_MAGIC | GUESTMSG_FLAG_COOKIE,
+            }) catch |err| return err;
+
+            if (statusOk(reply.ecx)) {
+                return .{
+                    .channel_id = @truncate(reply.edx >> 16),
+                    .cookie_high = reply.esi,
+                    .cookie_low = reply.edi,
+                    .io = io,
+                };
+            }
+
+            // Fallback: open without cookie flag (legacy VMware).
+            const legacy = io.call(.{
                 .ecx = makeEcx(SUBCMD_OPEN),
                 .ebx = GUESTRPC_MAGIC,
-            });
+            }) catch |err| return err;
 
-            if (!statusOk(reply.ecx)) {
+            if (!statusOk(legacy.ecx)) {
                 return error.ChannelOpenFailed;
             }
 
-            const channel_id: u16 = @truncate(reply.edx >> 16);
-            return .{ .channel_id = channel_id, .io = io };
+            return .{
+                .channel_id = @truncate(legacy.edx >> 16),
+                .cookie_high = 0,
+                .cookie_low = 0,
+                .io = io,
+            };
         }
 
         /// Close the channel (best-effort; errors are silently ignored).
@@ -100,6 +130,8 @@ pub fn Session(comptime Io: type) type {
             _ = self.io.call(.{
                 .ecx = makeEcx(SUBCMD_CLOSE),
                 .edx = self.makeEdx(),
+                .esi = self.cookie_high,
+                .edi = self.cookie_low,
             }) catch {};
         }
 
@@ -175,6 +207,8 @@ pub fn Session(comptime Io: type) type {
             const reply = try self.io.call(.{
                 .ecx = makeEcx(SUBCMD_REPLY_LEN),
                 .edx = self.makeEdx(),
+                .esi = self.cookie_high,
+                .edi = self.cookie_low,
             });
 
             const status = reply.ecx >> 16;
@@ -215,6 +249,8 @@ pub fn Session(comptime Io: type) type {
                 .ecx = makeEcx(SUBCMD_COMMAND_LEN),
                 .edx = self.makeEdx(),
                 .ebx = @truncate(length),
+                .esi = self.cookie_high,
+                .edi = self.cookie_low,
             });
 
             if (!statusOk(reply.ecx)) {
@@ -236,6 +272,8 @@ pub fn Session(comptime Io: type) type {
                     .ecx = makeEcx(SUBCMD_COMMAND_DATA),
                     .edx = self.makeEdx(),
                     .ebx = word,
+                    .esi = self.cookie_high,
+                    .edi = self.cookie_low,
                 });
 
                 if (!statusOk(reply.ecx)) {
@@ -255,6 +293,8 @@ pub fn Session(comptime Io: type) type {
             const reply = try self.io.call(.{
                 .ecx = makeEcx(SUBCMD_REPLY_LEN),
                 .edx = self.makeEdx(),
+                .esi = self.cookie_high,
+                .edi = self.cookie_low,
             });
 
             if (!statusOk(reply.ecx)) {
@@ -278,6 +318,8 @@ pub fn Session(comptime Io: type) type {
                     .ecx = makeEcx(SUBCMD_REPLY_DATA),
                     .edx = self.makeEdx(),
                     .ebx = @as(u32, reply_id),
+                    .esi = self.cookie_high,
+                    .edi = self.cookie_low,
                 });
 
                 if (!statusOk(reply.ecx)) {
@@ -300,6 +342,8 @@ pub fn Session(comptime Io: type) type {
                 .ecx = makeEcx(SUBCMD_REPLY_FINISH),
                 .edx = self.makeEdx(),
                 .ebx = @as(u32, reply_id),
+                .esi = self.cookie_high,
+                .edi = self.cookie_low,
             });
 
             if (!statusOk(reply.ecx)) {
@@ -355,9 +399,14 @@ test "open and close" {
 }
 
 test "open fails on bad status" {
-    var io: FakeIo = .{ .replies = &.{
-        .{ .ecx = 0x0000_0000 },
-    } };
+    var io: FakeIo = .{
+        .replies = &.{
+            // cookie attempt fails
+            .{ .ecx = 0x0000_0000 },
+            // legacy fallback also fails
+            .{ .ecx = 0x0000_0000 },
+        },
+    };
 
     const result = Session(FakeIo).open(&io);
     try std.testing.expectError(error.ChannelOpenFailed, result);
