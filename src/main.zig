@@ -27,7 +27,7 @@ const Subsystems = struct {
     serial_tracker: keyboard.SerialTracker,
     clip_watcher: watcher_mod.Watcher,
     clip_publisher: publisher_mod.Publisher,
-    vmware_poller: poller_mod.Poller,
+    vmware_poller: *poller_mod.Poller,
     bridge: bridge_state.Bridge,
     runtime: executor.Runtime,
 };
@@ -40,11 +40,8 @@ pub fn main() void {
     };
     defer deinitSubsystems(&subs);
 
-    // Wire runtime pointers now that subs is at its final stack address.
-    // Runtime borrows into Subsystems fields, so this must happen after
-    // the struct move from initSubsystems' return value is complete.
     subs.runtime = .{
-        .poller = &subs.vmware_poller,
+        .poller = subs.vmware_poller,
         .publisher = &subs.clip_publisher,
         .serial_tracker = &subs.serial_tracker,
     };
@@ -95,7 +92,7 @@ fn initSubsystems() ?Subsystems {
     };
     errdefer clip_publisher.deinit();
 
-    var vmware_poller = poller_mod.Poller.init(allocator) catch |err| {
+    const vmware_poller = poller_mod.Poller.create(allocator) catch |err| {
         log.err("vmware poller init failed: {}", .{err});
         clip_publisher.deinit();
         clip_watcher.deinit();
@@ -103,7 +100,7 @@ fn initSubsystems() ?Subsystems {
         wl_client.deinit();
         return null;
     };
-    errdefer vmware_poller.deinit();
+    errdefer vmware_poller.destroy();
 
     return .{
         .wl_client = wl_client,
@@ -119,7 +116,7 @@ fn initSubsystems() ?Subsystems {
 
 /// Tear down all subsystems in reverse initialization order.
 fn deinitSubsystems(subs: *Subsystems) void {
-    subs.vmware_poller.deinit();
+    subs.vmware_poller.destroy();
     subs.clip_publisher.deinit();
     subs.clip_watcher.deinit();
     subs.serial_tracker.deinit();

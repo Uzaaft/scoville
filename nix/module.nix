@@ -36,6 +36,9 @@ in {
       }
     ];
 
+    # VMware guest kernel modules are required for backdoor I/O port access.
+    virtualisation.vmware.guest.enable = lib.mkDefault true;
+
     systemd.user.services.scovilled = {
       description = "Scoville VMware clipboard bridge for Wayland";
       after = ["graphical-session.target"];

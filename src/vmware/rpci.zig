@@ -42,6 +42,10 @@ const STATUS_REPLY_DATA_SUCCESS: u32 = 0x0001_0000;
 const STATUS_REPLY_FINISH_SUCCESS: u32 = 0x0001_0000;
 const STATUS_CLOSE_SUCCESS: u32 = 0x0001_0000;
 
+/// GuestRPC status flag bits returned in the high byte of ECX.
+const STATUS_SUCCESS: u32 = 0x0001;
+const STATUS_DORECV: u32 = 0x0002;
+
 /// Reply status prefix indicating success ("1 " as little-endian u16).
 const RPC_SUCCESS_PREFIX: u16 = 0x2031;
 
@@ -155,31 +159,40 @@ pub fn Session(comptime Io: type) type {
         /// Poll for a pending host→guest message on this channel.
         ///
         /// Returns the raw message bytes if one is available, or null if the
-        /// channel has no pending data.  The caller owns the returned slice
-        /// and must free it with `allocator`.
+        /// channel is idle.  The caller owns the returned slice and must free
+        /// it with `allocator`.
         ///
-        /// This implements the TCLO receive path: check reply length, read
-        /// data if present, and finish the reply.  The caller is responsible
-        /// for sending a response via `sendReply` after processing.
+        /// Unlike `receiveReplyLength` (which expects the full 0x0083 status),
+        /// this checks the individual DORECV bit to distinguish "no data" from
+        /// "data ready", allowing non-blocking polling on TCLO channels.
         pub fn tryReceiveAlloc(
             self: *Self,
             allocator: Allocator,
         ) Error!?[]u8 {
-            const header = try self.receiveReplyLength();
-            if (header.length == 0) return null;
+            const reply = try self.io.call(.{
+                .ecx = makeEcx(SUBCMD_REPLY_LEN),
+                .edx = self.makeEdx(),
+            });
+
+            const status = reply.ecx >> 16;
+            if (status & STATUS_SUCCESS == 0) return error.ReceiveFailed;
+            if (status & STATUS_DORECV == 0) return null;
+
+            const length: usize = reply.ebx;
+            if (length == 0) return null;
 
             const limits: platform.Limits = .{};
-            if (header.length > limits.max_rpc_reply_bytes) {
-                return error.ReplyTooLarge;
-            }
+            if (length > limits.max_rpc_reply_bytes) return error.ReplyTooLarge;
 
-            const buf = allocator.alloc(u8, header.length) catch {
+            const reply_id: u16 = @truncate(reply.edx >> 16);
+
+            const buf = allocator.alloc(u8, length) catch {
                 return error.ReceiveFailed;
             };
             errdefer allocator.free(buf);
 
-            try self.receiveReplyData(header.reply_id, buf);
-            try self.finishReply(header.reply_id);
+            try self.receiveReplyData(reply_id, buf);
+            try self.finishReply(reply_id);
             return buf;
         }
 
@@ -424,12 +437,8 @@ test "tryReceiveAlloc returns null when no data pending" {
         .replies = &.{
             // open
             .{ .ecx = STATUS_OPEN_SUCCESS, .edx = @as(u32, channel_id) << 16 },
-            // receiveReplyLength: length=0 means nothing pending
-            .{
-                .ecx = STATUS_REPLY_LEN_SUCCESS,
-                .ebx = 0,
-                .edx = @as(u32, 0x0001) << 16,
-            },
+            // REPLY_LEN: success but no DORECV bit (no data pending)
+            .{ .ecx = STATUS_SUCCESS << 16 },
             // close
             .{ .ecx = STATUS_CLOSE_SUCCESS },
         },
@@ -453,9 +462,9 @@ test "tryReceiveAlloc returns message when data pending" {
         .replies = &.{
             // open
             .{ .ecx = STATUS_OPEN_SUCCESS, .edx = @as(u32, channel_id) << 16 },
-            // receiveReplyLength: 4 bytes pending
+            // REPLY_LEN: success + DORECV, 4 bytes pending
             .{
-                .ecx = STATUS_REPLY_LEN_SUCCESS,
+                .ecx = (STATUS_SUCCESS | STATUS_DORECV) << 16,
                 .ebx = 4,
                 .edx = @as(u32, reply_id) << 16,
             },

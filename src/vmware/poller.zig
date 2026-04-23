@@ -51,6 +51,10 @@ pub const Error = rpci.Error || clipboard.Error || Allocator.Error;
 ///
 /// Uses one GuestRPC channel for outbound RPCI commands and a second
 /// channel for inbound TCLO messages from the hypervisor.
+///
+/// **Must be heap-allocated** (or pinned on the stack) because the RPCI
+/// sessions hold pointers into `rpci_io` / `tclo_io`.  Call `create`
+/// instead of constructing directly.
 pub const Poller = struct {
     rpci_session: rpci.Session(BackdoorIo),
     tclo_session: rpci.Session(BackdoorIo),
@@ -59,38 +63,47 @@ pub const Poller = struct {
     allocator: Allocator,
     pending_text: ?[]u8,
 
-    /// Open both channels and negotiate V4 clipboard capability.
-    pub fn init(allocator: Allocator) Error!Poller {
-        var rpci_io: BackdoorIo = .{};
-        var rpci_session = try rpci.Session(BackdoorIo).open(&rpci_io);
+    /// Heap-allocate a Poller, open both channels, and negotiate V4
+    /// clipboard capability.  Returns a stable pointer whose sessions
+    /// reference the struct's own io fields.
+    pub fn create(allocator: Allocator) Error!*Poller {
+        const self = allocator.create(Poller) catch return error.OutOfMemory;
+        errdefer allocator.destroy(self);
 
-        const cap_reply = try rpci_session.transactAlloc(allocator, clipboard.RPCI_SET_CP_VERSION);
-        allocator.free(cap_reply);
-
-        var tclo_io: BackdoorIo = .{};
-        const tclo_session = rpci.Session(BackdoorIo).open(&tclo_io) catch |err| {
-            rpci_session.close();
-            return err;
-        };
-
-        return .{
-            .rpci_session = rpci_session,
-            .tclo_session = tclo_session,
-            .rpci_io = rpci_io,
-            .tclo_io = tclo_io,
+        self.* = .{
+            .rpci_session = undefined,
+            .tclo_session = undefined,
+            .rpci_io = .{},
+            .tclo_io = .{},
             .allocator = allocator,
             .pending_text = null,
         };
+
+        // Open RPCI channel with pointer into self.rpci_io (stable).
+        self.rpci_session = rpci.Session(BackdoorIo).open(&self.rpci_io) catch |err| return err;
+
+        const cap_reply = self.rpci_session.transactAlloc(allocator, clipboard.RPCI_SET_CP_VERSION) catch |err| {
+            self.rpci_session.close();
+            return err;
+        };
+        allocator.free(cap_reply);
+
+        // Open TCLO channel with pointer into self.tclo_io (stable).
+        self.tclo_session = rpci.Session(BackdoorIo).open(&self.tclo_io) catch |err| {
+            self.rpci_session.close();
+            return err;
+        };
+
+        return self;
     }
 
-    /// Release resources and close both GuestRPC channels.
-    pub fn deinit(self: *Poller) void {
-        if (self.pending_text) |text| {
-            self.allocator.free(text);
-            self.pending_text = null;
-        }
+    /// Release resources, close both GuestRPC channels, and free the
+    /// heap allocation created by `create`.
+    pub fn destroy(self: *Poller) void {
+        if (self.pending_text) |text| self.allocator.free(text);
         self.tclo_session.close();
         self.rpci_session.close();
+        self.allocator.destroy(self);
     }
 
     /// Poll the TCLO channel for an inbound clipboard message.
