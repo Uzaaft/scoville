@@ -73,30 +73,32 @@ pub const Registers = struct {
 // Backdoor invocation
 // ---------------------------------------------------------------------------
 
-/// Execute a VMware backdoor command on the standard port (0x5658).
+/// Execute a VMware backdoor command.
+///
+/// The port and channel ID are encoded in `req.edx` by the caller
+/// (defaults to BACKDOOR_PORT for simple commands).
 pub fn call(req: Registers) Error!Registers {
-    return callPort(BACKDOOR_PORT, req);
+    if (comptime builtin.cpu.arch == .x86_64)
+        return callX86(req)
+    else if (comptime builtin.cpu.arch == .aarch64)
+        return callArm64(req)
+    else
+        return error.UnsupportedArchitecture;
 }
 
 /// Execute a VMware backdoor command on the high-bandwidth port (0x5659).
 pub fn callHighBandwidth(req: Registers) Error!Registers {
-    return callPort(BACKDOOR_HB_PORT, req);
-}
-
-fn callPort(port: u16, req: Registers) Error!Registers {
-    if (comptime builtin.cpu.arch == .x86_64)
-        return callX86(port, req)
-    else if (comptime builtin.cpu.arch == .aarch64)
-        return callArm64(port, req)
-    else
-        return error.UnsupportedArchitecture;
+    var hb_req = req;
+    // Replace the port bits (low 16) with the HB port, keeping channel ID.
+    hb_req.edx = (req.edx & 0xFFFF_0000) | BACKDOOR_HB_PORT;
+    return call(hb_req);
 }
 
 // ---------------------------------------------------------------------------
 // x86_64: IN instruction on I/O port
 // ---------------------------------------------------------------------------
 
-fn callX86(port: u16, req: Registers) Registers {
+fn callX86(req: Registers) Registers {
     var out_eax: u32 = undefined;
     var out_ebx: u32 = undefined;
     var out_ecx: u32 = undefined;
@@ -114,7 +116,7 @@ fn callX86(port: u16, req: Registers) Registers {
         : [_] "{eax}" (MAGIC),
           [_] "{ebx}" (req.ebx),
           [_] "{ecx}" (req.ecx),
-          [_] "{edx}" (@as(u32, port)),
+          [_] "{edx}" (req.edx),
           [_] "{esi}" (req.esi),
           [_] "{edi}" (req.edi),
     );
@@ -133,13 +135,11 @@ fn callX86(port: u16, req: Registers) Registers {
 // aarch64: MRS XZR, MDCCSR_EL0 trapped by VMware
 // ---------------------------------------------------------------------------
 
-fn callArm64(port: u16, req: Registers) Registers {
+fn callArm64(req: Registers) Registers {
     // X7 control word: low 32 = IO descriptor, high 32 = magic 0x86.
     const w7: u64 = (X86_IO_W7_WITH | X86_IO_W7_DIR | X86_IO_W7_SIZE_4B) |
         (X86_IO_MAGIC << 32);
 
-    // Use explicit register constraints matching the x86 register mapping:
-    //   x0=eax, x1=ebx, x2=ecx, x3=edx, x4=esi, x5=edi
     var out_x0: u64 = undefined;
     var out_x1: u64 = undefined;
     var out_x2: u64 = undefined;
@@ -157,7 +157,7 @@ fn callArm64(port: u16, req: Registers) Registers {
         : [_] "{x0}" (@as(u64, MAGIC)),
           [_] "{x1}" (@as(u64, req.ebx)),
           [_] "{x2}" (@as(u64, req.ecx)),
-          [_] "{x3}" (@as(u64, port)),
+          [_] "{x3}" (@as(u64, req.edx)),
           [_] "{x4}" (@as(u64, req.esi)),
           [_] "{x5}" (@as(u64, req.edi)),
           [_] "{x7}" (w7),
