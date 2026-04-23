@@ -59,65 +59,65 @@ pub fn main() void {
 /// Initialize all subsystems in dependency order.
 /// Returns null on any failure after logging the error.
 fn initSubsystems() ?Subsystems {
-    log.debug("probing vmware hypervisor", .{});
+    log.info("probing vmware hypervisor", .{});
     backdoor.probeVmware() catch |err| {
-        log.err("vmware hypervisor not detected: {}", .{err});
+        log.err("vmware hypervisor not detected: {s}", .{@errorName(err)});
         return null;
     };
-    log.debug("vmware hypervisor detected", .{});
+    log.info("vmware hypervisor detected", .{});
 
-    log.debug("connecting to wayland display", .{});
+    log.info("connecting to wayland display", .{});
     var wl_client = client_mod.Client.init() catch |err| {
-        log.err("wayland client init failed: {}", .{err});
+        log.err("wayland connect failed: {s}", .{@errorName(err)});
         return null;
     };
     errdefer wl_client.deinit();
-    log.debug("wayland connected, fd={d}", .{wl_client.fd()});
-
-    const seat = wl_client.globals.seat.?;
-    const manager = wl_client.globals.data_device_manager.?;
-    log.debug("wayland globals bound: seat, data_device_manager, primary_selection={}", .{
+    log.info("wayland connected, fd={d}", .{wl_client.fd()});
+    log.debug("globals: seat={}, ddm={}, primary_sel={}", .{
+        wl_client.globals.seat != null,
+        wl_client.globals.data_device_manager != null,
         wl_client.globals.primary_selection_manager != null,
     });
 
+    const seat = wl_client.globals.seat.?;
+    const manager = wl_client.globals.data_device_manager.?;
+
+    log.info("attaching keyboard listener", .{});
     var serial_tracker = keyboard.SerialTracker.init(seat) orelse {
-        log.err("keyboard serial tracker init failed: seat has no keyboard", .{});
+        log.err("seat has no keyboard capability", .{});
         wl_client.deinit();
         return null;
     };
     errdefer serial_tracker.deinit();
-    log.debug("keyboard serial tracker ready", .{});
 
+    log.info("creating clipboard watcher", .{});
     var clip_watcher = watcher_mod.Watcher.init(allocator, manager, seat) catch |err| {
-        log.err("clipboard watcher init failed: {}", .{err});
+        log.err("clipboard watcher init failed: {s}", .{@errorName(err)});
         serial_tracker.deinit();
         wl_client.deinit();
         return null;
     };
     errdefer clip_watcher.deinit();
-    log.debug("clipboard watcher ready", .{});
 
+    log.info("creating clipboard publisher", .{});
     var clip_publisher = publisher_mod.Publisher.init(allocator, manager, seat) catch |err| {
-        log.err("clipboard publisher init failed: {}", .{err});
+        log.err("clipboard publisher init failed: {s}", .{@errorName(err)});
         clip_watcher.deinit();
         serial_tracker.deinit();
         wl_client.deinit();
         return null;
     };
     errdefer clip_publisher.deinit();
-    log.debug("clipboard publisher ready", .{});
 
-    log.debug("opening vmware rpci/tclo channels", .{});
+    log.info("initializing vmware clipboard poller", .{});
     const vmware_poller = poller_mod.Poller.create(allocator) catch |err| {
-        log.err("vmware poller init failed: {}", .{err});
+        log.err("vmware poller init failed: {s}", .{@errorName(err)});
         clip_publisher.deinit();
         clip_watcher.deinit();
         serial_tracker.deinit();
         wl_client.deinit();
         return null;
     };
-    errdefer vmware_poller.destroy();
-    log.debug("vmware poller ready", .{});
 
     return .{
         .wl_client = wl_client,
@@ -164,7 +164,7 @@ fn runLoop(subs: *Subsystems) void {
         if (fds[0].revents & std.c.POLL.IN != 0) {
             log.debug("wayland fd readable, dispatching", .{});
             subs.wl_client.roundtrip() catch |err| {
-                log.err("wayland roundtrip failed: {}", .{err});
+                log.err("wayland roundtrip failed: {s}", .{@errorName(err)});
                 return;
             };
         }
@@ -183,12 +183,12 @@ fn processEvents(subs: *Subsystems) void {
         const action = subs.bridge.process(event);
         logAction("wayland", action);
         subs.runtime.dispatch(action) catch |err| {
-            log.err("bridge dispatch failed for wayland event: {}", .{err});
+            log.err("bridge dispatch failed for wayland event: {s}", .{@errorName(err)});
         };
     }
 
     const vmware_event = subs.vmware_poller.poll() catch |err| {
-        log.err("vmware poll failed: {}", .{err});
+        log.err("vmware poll failed: {s}", .{@errorName(err)});
         return;
     };
     if (vmware_event) |event| {
@@ -199,7 +199,7 @@ fn processEvents(subs: *Subsystems) void {
         const action = subs.bridge.process(event);
         logAction("vmware", action);
         subs.runtime.dispatch(action) catch |err| {
-            log.err("bridge dispatch failed for vmware event: {}", .{err});
+            log.err("bridge dispatch failed for vmware event: {s}", .{@errorName(err)});
         };
     }
 }

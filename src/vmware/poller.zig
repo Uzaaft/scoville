@@ -79,21 +79,29 @@ pub const Poller = struct {
             .pending_text = null,
         };
 
-        // Open RPCI channel with pointer into self.rpci_io (stable).
-        self.rpci_session = rpci.Session(BackdoorIo).open(&self.rpci_io) catch |err| return err;
+        log.info("opening RPCI channel", .{});
+        self.rpci_session = rpci.Session(BackdoorIo).open(&self.rpci_io) catch |err| {
+            log.err("RPCI channel open failed: {s}", .{@errorName(err)});
+            return err;
+        };
 
+        log.info("negotiating clipboard V4 capability", .{});
         const cap_reply = self.rpci_session.transactAlloc(allocator, clipboard.RPCI_SET_CP_VERSION) catch |err| {
+            log.err("capability negotiation failed: {s}", .{@errorName(err)});
             self.rpci_session.close();
             return err;
         };
+        log.debug("capability reply: {d} bytes", .{cap_reply.len});
         allocator.free(cap_reply);
 
-        // Open TCLO channel with pointer into self.tclo_io (stable).
+        log.info("opening TCLO channel", .{});
         self.tclo_session = rpci.Session(BackdoorIo).open(&self.tclo_io) catch |err| {
+            log.err("TCLO channel open failed: {s}", .{@errorName(err)});
             self.rpci_session.close();
             return err;
         };
 
+        log.info("VMware clipboard poller ready", .{});
         return self;
     }
 
