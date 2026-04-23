@@ -15,6 +15,10 @@ test {
     _ = @import("wayland/client.zig");
     _ = @import("wayland/clipboard.zig");
     _ = @import("wayland/source.zig");
+    _ = @import("wayland/keyboard.zig");
+    _ = @import("wayland/watcher.zig");
+    _ = @import("wayland/publisher.zig");
+    _ = @import("vmware/poller.zig");
     _ = @import("bridge/state.zig");
     _ = @import("bridge/sync.zig");
     _ = @import("daemon.zig");
