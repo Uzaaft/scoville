@@ -125,6 +125,7 @@ pub const Poller = struct {
 
     /// Parse a raw TCLO message and extract clipboard text if present.
     fn handleTcloMessage(self: *Poller, raw: []const u8) Error!?bridge_state.Event {
+        log.debug("TCLO message received, {d} bytes", .{raw.len});
         const msg = clipboard.parseTransportMessage(raw) catch {
             log.debug("ignoring non-clipboard TCLO message ({d} bytes)", .{raw.len});
             return null;
@@ -140,6 +141,7 @@ pub const Poller = struct {
 
     /// Decode a CMD_RECV_CLIPBOARD payload into a bridge event.
     fn handleRecvClipboard(self: *Poller, payload: []const u8) Error!?bridge_state.Event {
+        log.debug("CMD_RECV_CLIPBOARD, payload {d} bytes", .{payload.len});
         const text = clipboard.deserializeClipboard(payload) catch |err| {
             log.err("clipboard deserialization failed: {}", .{err});
             return null;

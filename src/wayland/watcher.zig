@@ -163,13 +163,13 @@ fn handleDataOffer(
     const self: *Watcher = @ptrCast(@alignCast(data));
     const new_offer = offer orelse return;
 
-    // Replace any prior offer that was not yet consumed by a selection event.
     if (self.current_offer) |old| {
         c.wl_data_offer_destroy(old);
     }
 
     self.current_offer = new_offer;
     self.offered_mimes.reset();
+    log.debug("new data offer received", .{});
 
     _ = c.wl_data_offer_add_listener(new_offer, &OFFER_LISTENER, data);
 }
@@ -185,7 +185,7 @@ fn handleSelection(
     self.freePendingPayload();
 
     if (offer == null) {
-        // Selection cleared.
+        log.debug("selection cleared", .{});
         self.pending_event = .{
             .origin = .wayland,
             .selection = .clipboard,
@@ -201,7 +201,11 @@ fn handleSelection(
 /// pending bridge event.  Split from `handleSelection` to stay within
 /// the function size limit.
 fn receiveSelection(self: *Watcher) void {
-    const best = self.offered_mimes.bestMatch() orelse return;
+    const best = self.offered_mimes.bestMatch() orelse {
+        log.debug("no matching MIME type in offer", .{});
+        return;
+    };
+    log.debug("receiving selection, mime={s}", .{best});
 
     var fds: [2]fd_t = undefined;
     if (std.c.pipe(&fds) != 0) {
@@ -233,6 +237,7 @@ fn receiveSelection(self: *Watcher) void {
         return;
     }
 
+    log.debug("received {d} bytes from wayland clipboard", .{text.len});
     self.pending_event = .{
         .origin = .wayland,
         .selection = .clipboard,

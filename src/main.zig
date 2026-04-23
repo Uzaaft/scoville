@@ -5,6 +5,11 @@
 //! connection is lost or a fatal error occurs.
 
 const std = @import("std");
+const build_options = @import("build_options");
+
+pub const std_options: std.Options = .{
+    .log_level = @enumFromInt(@intFromEnum(build_options.log_level)),
+};
 
 const backdoor = @import("vmware/backdoor.zig");
 const poller_mod = @import("vmware/poller.zig");
@@ -54,19 +59,26 @@ pub fn main() void {
 /// Initialize all subsystems in dependency order.
 /// Returns null on any failure after logging the error.
 fn initSubsystems() ?Subsystems {
+    log.debug("probing vmware hypervisor", .{});
     backdoor.probeVmware() catch |err| {
         log.err("vmware hypervisor not detected: {}", .{err});
         return null;
     };
+    log.debug("vmware hypervisor detected", .{});
 
+    log.debug("connecting to wayland display", .{});
     var wl_client = client_mod.Client.init() catch |err| {
         log.err("wayland client init failed: {}", .{err});
         return null;
     };
     errdefer wl_client.deinit();
+    log.debug("wayland connected, fd={d}", .{wl_client.fd()});
 
     const seat = wl_client.globals.seat.?;
     const manager = wl_client.globals.data_device_manager.?;
+    log.debug("wayland globals bound: seat, data_device_manager, primary_selection={}", .{
+        wl_client.globals.primary_selection_manager != null,
+    });
 
     var serial_tracker = keyboard.SerialTracker.init(seat) orelse {
         log.err("keyboard serial tracker init failed: seat has no keyboard", .{});
@@ -74,6 +86,7 @@ fn initSubsystems() ?Subsystems {
         return null;
     };
     errdefer serial_tracker.deinit();
+    log.debug("keyboard serial tracker ready", .{});
 
     var clip_watcher = watcher_mod.Watcher.init(allocator, manager, seat) catch |err| {
         log.err("clipboard watcher init failed: {}", .{err});
@@ -82,6 +95,7 @@ fn initSubsystems() ?Subsystems {
         return null;
     };
     errdefer clip_watcher.deinit();
+    log.debug("clipboard watcher ready", .{});
 
     var clip_publisher = publisher_mod.Publisher.init(allocator, manager, seat) catch |err| {
         log.err("clipboard publisher init failed: {}", .{err});
@@ -91,7 +105,9 @@ fn initSubsystems() ?Subsystems {
         return null;
     };
     errdefer clip_publisher.deinit();
+    log.debug("clipboard publisher ready", .{});
 
+    log.debug("opening vmware rpci/tclo channels", .{});
     const vmware_poller = poller_mod.Poller.create(allocator) catch |err| {
         log.err("vmware poller init failed: {}", .{err});
         clip_publisher.deinit();
@@ -101,6 +117,7 @@ fn initSubsystems() ?Subsystems {
         return null;
     };
     errdefer vmware_poller.destroy();
+    log.debug("vmware poller ready", .{});
 
     return .{
         .wl_client = wl_client,
@@ -128,6 +145,8 @@ fn runLoop(subs: *Subsystems) void {
     const config: daemon.Config = .{};
     const wl_fd = subs.wl_client.fd();
 
+    log.info("entering event loop, poll_interval={d}ms", .{config.vmware_poll_interval_ms});
+
     while (true) {
         var fds = [1]std.c.pollfd{.{
             .fd = wl_fd,
@@ -142,8 +161,8 @@ fn runLoop(subs: *Subsystems) void {
             return;
         }
 
-        // Dispatch Wayland events if the fd is readable.
         if (fds[0].revents & std.c.POLL.IN != 0) {
+            log.debug("wayland fd readable, dispatching", .{});
             subs.wl_client.roundtrip() catch |err| {
                 log.err("wayland roundtrip failed: {}", .{err});
                 return;
@@ -157,7 +176,12 @@ fn runLoop(subs: *Subsystems) void {
 /// Drain pending events from both sources and dispatch through the bridge.
 fn processEvents(subs: *Subsystems) void {
     if (subs.clip_watcher.takeEvent()) |event| {
+        log.debug("wayland clipboard event: {s} {s}", .{
+            @tagName(event.selection),
+            @tagName(event.payload),
+        });
         const action = subs.bridge.process(event);
+        logAction("wayland", action);
         subs.runtime.dispatch(action) catch |err| {
             log.err("bridge dispatch failed for wayland event: {}", .{err});
         };
@@ -168,9 +192,28 @@ fn processEvents(subs: *Subsystems) void {
         return;
     };
     if (vmware_event) |event| {
+        log.debug("vmware clipboard event: {s} {s}", .{
+            @tagName(event.selection),
+            @tagName(event.payload),
+        });
         const action = subs.bridge.process(event);
+        logAction("vmware", action);
         subs.runtime.dispatch(action) catch |err| {
             log.err("bridge dispatch failed for vmware event: {}", .{err});
         };
+    }
+}
+
+fn logAction(source: []const u8, action: bridge_state.Action) void {
+    switch (action) {
+        .push_vmware => |d| log.debug("{s} -> push_vmware ({s}, {d} bytes)", .{
+            source, @tagName(d.selection), d.text.len,
+        }),
+        .push_wayland => |d| log.debug("{s} -> push_wayland ({s}, {d} bytes)", .{
+            source, @tagName(d.selection), d.text.len,
+        }),
+        .clear_wayland => |s| log.debug("{s} -> clear_wayland ({s})", .{ source, @tagName(s) }),
+        .clear_vmware => |s| log.debug("{s} -> clear_vmware ({s})", .{ source, @tagName(s) }),
+        .none => {},
     }
 }

@@ -4,6 +4,16 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
+    const log_level = b.option(
+        std.log.Level,
+        "log_level",
+        "Log verbosity (err, warn, info, debug; default: info)",
+    ) orelse .info;
+
+    // Build options module shared by library and executable
+    const options = b.addOptions();
+    options.addOption(std.log.Level, "log_level", log_level);
+
     // Generate primary-selection protocol header and C source via wayland-scanner
     const wl_generate_header = b.addSystemCommand(&.{
         "wayland-scanner", "client-header",
@@ -26,6 +36,8 @@ pub fn build(b: *std.Build) void {
     translate_c.addIncludePath(primary_sel_header.dirname());
     translate_c.linkSystemLibrary("wayland-client", .{});
 
+    const options_mod = options.createModule();
+
     // Library module
     const lib_mod = b.addModule("scoville", .{
         .root_source_file = b.path("src/root.zig"),
@@ -33,6 +45,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .imports = &.{
             .{ .name = "c", .module = translate_c.createModule() },
+            .{ .name = "build_options", .module = options_mod },
         },
     });
 
@@ -60,6 +73,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .imports = &.{
             .{ .name = "c", .module = translate_c.createModule() },
+            .{ .name = "build_options", .module = options_mod },
         },
     });
     exe_mod.addCSourceFile(.{ .file = primary_sel_code });

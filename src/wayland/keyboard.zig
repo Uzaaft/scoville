@@ -64,7 +64,10 @@ fn handleEnter(
 ) callconv(.c) void {
     const tracker: *SerialTracker = @ptrCast(@alignCast(data));
     tracker.serial = serial;
+    log.debug("keyboard enter, serial={d}", .{serial});
 }
+
+const log = std.log.scoped(.keyboard);
 
 fn handleLeave(
     _: ?*anyopaque,

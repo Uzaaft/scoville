@@ -5,6 +5,11 @@
 //! data to and from the Wayland compositor via wl_data_device.
 
 const std = @import("std");
+const build_options = @import("build_options");
+
+pub const std_options: std.Options = .{
+    .log_level = @enumFromInt(@intFromEnum(build_options.log_level)),
+};
 
 test {
     _ = @import("platform.zig");

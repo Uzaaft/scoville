@@ -35,18 +35,20 @@ pub const Runtime = struct {
     pub fn dispatch(self: *Runtime, action: state.Action) Error!void {
         switch (action) {
             .push_vmware => |data| {
+                log.debug("sending {d} bytes to vmware host", .{data.text.len});
                 try self.poller.sendClipboard(data.text);
             },
             .push_wayland => |data| {
-                try self.publisher.publish(data.text, self.serial_tracker.lastSerial());
+                const serial = self.serial_tracker.lastSerial();
+                log.debug("publishing {d} bytes to wayland, serial={d}", .{ data.text.len, serial });
+                try self.publisher.publish(data.text, serial);
             },
             .clear_wayland => {
+                log.debug("clearing wayland selection", .{});
                 self.publisher.clear();
             },
             .clear_vmware => |sel| {
-                // Clearing the VMware host clipboard requires sending an empty
-                // clipboard packet, which is not yet implemented. Log and skip.
-                log.info("clear_vmware requested for {s}, not yet implemented", .{@tagName(sel)});
+                log.debug("clear_vmware requested for {s}, not yet implemented", .{@tagName(sel)});
             },
             .none => {},
         }
